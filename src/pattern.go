@@ -33,6 +33,7 @@ type term struct {
 	inv           bool
 	text          []rune
 	caseSensitive bool
+	normalize     bool
 }
 
 // String returns the string representation of a term.
@@ -52,6 +53,7 @@ type Pattern struct {
 	forward       bool
 	text          []rune
 	termSets      []termSet
+	sortable      bool
 	cacheable     bool
 	cacheKey      string
 	delimiter     Delimiter
@@ -101,23 +103,34 @@ func BuildPattern(fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case,
 	}
 
 	caseSensitive := true
+	sortable := true
 	termSets := []termSet{}
 
 	if extended {
 		termSets = parseTerms(fuzzy, caseMode, normalize, asString)
+		// We should not sort the result if there are only inverse search terms
+		sortable = false
 	Loop:
 		for _, termSet := range termSets {
 			for idx, term := range termSet {
+				if !term.inv {
+					sortable = true
+				}
 				// If the query contains inverse search terms or OR operators,
 				// we cannot cache the search scope
 				if !cacheable || idx > 0 || term.inv || fuzzy && term.typ != termFuzzy || !fuzzy && term.typ != termExact {
 					cacheable = false
-					break Loop
+					if sortable {
+						// Can't break until we see at least one non-inverse term
+						break Loop
+					}
 				}
 			}
 		}
 	} else {
 		lowerString := strings.ToLower(asString)
+		normalize = normalize &&
+			lowerString == string(algo.NormalizeRunes([]rune(lowerString)))
 		caseSensitive = caseMode == CaseRespect ||
 			caseMode == CaseSmart && lowerString != asString
 		if !caseSensitive {
@@ -134,6 +147,7 @@ func BuildPattern(fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case,
 		forward:       forward,
 		text:          []rune(asString),
 		termSets:      termSets,
+		sortable:      sortable,
 		cacheable:     cacheable,
 		nth:           nth,
 		delimiter:     delimiter,
@@ -162,6 +176,8 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 		lowerText := strings.ToLower(text)
 		caseSensitive := caseMode == CaseRespect ||
 			caseMode == CaseSmart && text != lowerText
+		normalizeTerm := normalize &&
+			lowerText == string(algo.NormalizeRunes([]rune(lowerText)))
 		if !caseSensitive {
 			text = lowerText
 		}
@@ -211,14 +227,15 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 				set = termSet{}
 			}
 			textRunes := []rune(text)
-			if normalize {
+			if normalizeTerm {
 				textRunes = algo.NormalizeRunes(textRunes)
 			}
 			set = append(set, term{
 				typ:           typ,
 				inv:           inv,
 				text:          textRunes,
-				caseSensitive: caseSensitive})
+				caseSensitive: caseSensitive,
+				normalize:     normalizeTerm})
 			switchSet = true
 		}
 	}
@@ -349,7 +366,7 @@ func (p *Pattern) extendedMatch(item *Item, withPos bool, slab *util.Slab) ([]Of
 		matched := false
 		for _, term := range termSet {
 			pfun := p.procFun[term.typ]
-			off, score, pos := p.iter(pfun, input, term.caseSensitive, p.normalize, p.forward, term.text, withPos, slab)
+			off, score, pos := p.iter(pfun, input, term.caseSensitive, term.normalize, p.forward, term.text, withPos, slab)
 			if sidx := off[0]; sidx >= 0 {
 				if term.inv {
 					continue
